@@ -1,0 +1,6 @@
+.env
+*_classified.csv
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
