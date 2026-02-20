@@ -3,7 +3,8 @@
 classify.py — Research and classify companies from a CSV using Claude + web search.
 
 Usage:
-    python classify.py input.csv --name "company_name" --url "website"
+    python classify.py input.csv --name "name" --url "website"
+    python classify.py input.csv --name "name" --url "website" --resume  # skip already-done rows
 """
 
 import argparse
@@ -18,16 +19,6 @@ import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
-
-CATEGORIES = [
-    "Health System",
-    "Non-Profit",
-    "National Chain",
-    "Franchise",
-    "Regional",
-    "Local Business",
-    "Unknown",
-]
 
 CLASSIFICATION_PROMPT = """You are a business research assistant. Your task is to classify a company into exactly one of these categories (listed in priority order — assign the highest-priority category that applies):
 
@@ -44,7 +35,7 @@ Company to classify:
   Website: {url}
 
 Instructions:
-- Search the web to research this company
+- {search_instruction}
 - Look for: ownership structure, number of locations, geographic footprint, non-profit status, franchise indicators, parent company
 - Apply the priority order strictly — if it qualifies for multiple categories, choose the highest-priority one
 - Respond ONLY with valid JSON in this exact format:
@@ -52,35 +43,41 @@ Instructions:
 
 
 def classify_company(client: anthropic.Anthropic, name: str, url: str) -> dict:
-    """Research and classify a single company using Claude with web search."""
-    search_query = name if not url else f"{name} {url}"
+    """Classify a single company. Uses web search only if no URL is provided."""
+    has_url = bool(url and url.strip())
+
+    if has_url:
+        search_instruction = "Use the company name and website URL provided to classify this company based on your knowledge"
+        tools = []
+    else:
+        search_instruction = "Search the web to research this company"
+        tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}]
+
     prompt = CLASSIFICATION_PROMPT.format(
         name=name or "(unknown)",
         url=url or "(not provided)",
+        search_instruction=search_instruction,
     )
 
     try:
-        response = client.messages.create(
+        kwargs = dict(
             model="claude-sonnet-4-6",
-            max_tokens=1024,
-            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+            max_tokens=256,
             messages=[{"role": "user", "content": prompt}],
         )
+        if tools:
+            kwargs["tools"] = tools
 
-        # Extract text from response content blocks
-        text_content = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                text_content += block.text
+        response = client.messages.create(**kwargs)
 
-        # Parse JSON from response
+        text_content = "".join(b.text for b in response.content if hasattr(b, "text"))
+
         result = _parse_json(text_content)
         if result:
             return result
 
-        # Retry once if JSON parse failed
         print(f"    Retrying JSON parse for: {name}")
-        result = _parse_json_retry(client, text_content, prompt)
+        result = _parse_json_retry(client, text_content)
         if result:
             return result
 
@@ -91,15 +88,11 @@ def classify_company(client: anthropic.Anthropic, name: str, url: str) -> dict:
 
 
 def _parse_json(text: str) -> dict | None:
-    """Try to extract and parse JSON from a text string."""
     text = text.strip()
-    # Try direct parse first
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-
-    # Look for JSON block
     start = text.find("{")
     end = text.rfind("}") + 1
     if start != -1 and end > start:
@@ -107,17 +100,15 @@ def _parse_json(text: str) -> dict | None:
             return json.loads(text[start:end])
         except json.JSONDecodeError:
             pass
-
     return None
 
 
-def _parse_json_retry(client: anthropic.Anthropic, bad_response: str, original_prompt: str) -> dict | None:
-    """Ask Claude to fix a malformed JSON response."""
+def _parse_json_retry(client: anthropic.Anthropic, bad_response: str) -> dict | None:
     try:
         fix_prompt = (
             f"The following response was supposed to be valid JSON matching "
             f'{{"category": "...", "notes": "..."}} but it was malformed. '
-            f"Please return ONLY the corrected JSON, nothing else.\n\nResponse:\n{bad_response}"
+            f"Return ONLY the corrected JSON, nothing else.\n\nResponse:\n{bad_response}"
         )
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -130,7 +121,7 @@ def _parse_json_retry(client: anthropic.Anthropic, bad_response: str, original_p
         return None
 
 
-def process_csv(input_path: str, name_col: str, url_col: str) -> None:
+def process_csv(input_path: str, name_col: str, url_col: str, resume: bool) -> None:
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         print("Error: ANTHROPIC_API_KEY not set. Add it to your .env file or environment.")
@@ -159,14 +150,27 @@ def process_csv(input_path: str, name_col: str, url_col: str) -> None:
 
         rows = list(reader)
 
+    # If resuming, figure out how many rows are already done
+    already_done = 0
+    if resume and output_path.exists():
+        with open(output_path, newline="", encoding="utf-8") as f:
+            already_done = sum(1 for _ in csv.DictReader(f))
+        print(f"Resuming from row {already_done + 1} ({already_done} already done)")
+
     total = len(rows)
     output_fields = list(fieldnames) + ["Category", "Notes"]
 
-    with open(output_path, "w", newline="", encoding="utf-8") as out_f:
+    # Open in append mode if resuming, write mode otherwise
+    file_mode = "a" if resume and already_done > 0 else "w"
+    with open(output_path, file_mode, newline="", encoding="utf-8") as out_f:
         writer = csv.DictWriter(out_f, fieldnames=output_fields)
-        writer.writeheader()
+        if file_mode == "w":
+            writer.writeheader()
 
         for i, row in enumerate(rows, start=1):
+            if i <= already_done:
+                continue
+
             name = row.get(name_col, "").strip()
             url = row.get(url_col, "").strip() if url_col in fieldnames else ""
 
@@ -176,31 +180,24 @@ def process_csv(input_path: str, name_col: str, url_col: str) -> None:
             row["Category"] = result.get("category", "Unknown")
             row["Notes"] = result.get("notes", "")
             writer.writerow(row)
-            out_f.flush()  # write each row immediately in case of interruption
+            out_f.flush()
 
             if i < total:
-                time.sleep(1)  # rate limit buffer
+                time.sleep(0.5)
 
     print(f"\nDone! Output written to: {output_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Classify companies from a CSV using Claude + web search."
+        description="Classify companies from a CSV using Claude."
     )
     parser.add_argument("input", help="Path to input CSV file")
-    parser.add_argument(
-        "--name",
-        default="name",
-        help="Column name containing company names (default: 'name')",
-    )
-    parser.add_argument(
-        "--url",
-        default="website",
-        help="Column name containing website URLs (default: 'website')",
-    )
+    parser.add_argument("--name", default="name", help="Column containing company names (default: 'name')")
+    parser.add_argument("--url", default="website", help="Column containing website URLs (default: 'website')")
+    parser.add_argument("--resume", action="store_true", help="Skip rows already in the output file")
     args = parser.parse_args()
-    process_csv(args.input, args.name, args.url)
+    process_csv(args.input, args.name, args.url, args.resume)
 
 
 if __name__ == "__main__":
