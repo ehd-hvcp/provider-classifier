@@ -61,7 +61,7 @@ def classify_company(client: anthropic.Anthropic, name: str, url: str) -> dict:
 
     try:
         kwargs = dict(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=256,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -111,7 +111,7 @@ def _parse_json_retry(client: anthropic.Anthropic, bad_response: str) -> dict | 
             f"Return ONLY the corrected JSON, nothing else.\n\nResponse:\n{bad_response}"
         )
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=256,
             messages=[{"role": "user", "content": fix_prompt}],
         )
@@ -185,7 +185,6 @@ def process_csv(input_path: str, name_col: str, url_col: str, resume: bool, redo
                     result = classify_company(client, name, url)
                     row["Category"] = result.get("category", "Unknown")
                     row["Notes"] = result.get("notes", "")
-                    time.sleep(0.5)
 
                 writer.writerow(row)
                 out_f.flush()
