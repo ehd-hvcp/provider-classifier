@@ -38,8 +38,14 @@ Instructions:
 - {search_instruction}
 - Look for: ownership structure, number of locations, geographic footprint, non-profit status, franchise indicators, parent company
 - Apply the priority order strictly — if it qualifies for multiple categories, choose the highest-priority one
+- The "category" value MUST be one of exactly these 7 strings: "Health System", "Non-Profit", "National Chain", "Franchise", "Regional", "Local Business", "Unknown". Do not use any other value.
 - Respond ONLY with valid JSON in this exact format:
 {{"category": "<one of the 7 categories above>", "notes": "<1-2 sentence explanation of why>"}}"""
+
+VALID_CATEGORIES = {
+    "Health System", "Non-Profit", "National Chain",
+    "Franchise", "Regional", "Local Business", "Unknown"
+}
 
 
 def classify_company(client: anthropic.Anthropic, name: str, url: str) -> dict:
@@ -73,12 +79,12 @@ def classify_company(client: anthropic.Anthropic, name: str, url: str) -> dict:
         text_content = "".join(b.text for b in response.content if hasattr(b, "text"))
 
         result = _parse_json(text_content)
-        if result:
+        if result and result.get("category") in VALID_CATEGORIES:
             return result
 
         print(f"    Retrying JSON parse for: {name}")
         result = _parse_json_retry(client, text_content)
-        if result:
+        if result and result.get("category") in VALID_CATEGORIES:
             return result
 
         return {"category": "Unknown", "notes": "Error: Could not parse classification response"}
@@ -162,8 +168,9 @@ def process_csv(input_path: str, name_col: str, url_col: str, resume: bool, redo
         classified = {}
         for i, row in enumerate(existing):
             notes = row.get("Notes", "")
-            if not notes.startswith("Error:"):
-                classified[i] = {"category": row["Category"], "notes": notes}
+            category = row.get("Category", "")
+            if not notes.startswith("Error:") and category in VALID_CATEGORIES:
+                classified[i] = {"category": category, "notes": notes}
 
         error_count = len(existing) - len(classified)
         print(f"Re-processing {error_count} rows that failed with API errors...")
