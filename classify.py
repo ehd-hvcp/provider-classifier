@@ -121,7 +121,7 @@ def _parse_json_retry(client: anthropic.Anthropic, bad_response: str) -> dict | 
         return None
 
 
-def process_csv(input_path: str, name_col: str, url_col: str, resume: bool) -> None:
+def process_csv(input_path: str, name_col: str, url_col: str, resume: bool, redo_errors: bool) -> None:
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         print("Error: ANTHROPIC_API_KEY not set. Add it to your .env file or environment.")
@@ -150,17 +150,56 @@ def process_csv(input_path: str, name_col: str, url_col: str, resume: bool) -> N
 
         rows = list(reader)
 
-    # If resuming, figure out how many rows are already done
+    total = len(rows)
+    output_fields = list(fieldnames) + ["Category", "Notes"]
+
+    # --redo-errors: re-classify the full output, fixing rows with "Error:" in Notes
+    if redo_errors and output_path.exists():
+        with open(output_path, newline="", encoding="utf-8") as f:
+            existing = list(csv.DictReader(f))
+
+        # Build a lookup of already-classified rows by position
+        classified = {}
+        for i, row in enumerate(existing):
+            notes = row.get("Notes", "")
+            if not notes.startswith("Error:"):
+                classified[i] = {"category": row["Category"], "notes": notes}
+
+        error_count = len(existing) - len(classified)
+        print(f"Re-processing {error_count} rows that failed with API errors...")
+
+        with open(output_path, "w", newline="", encoding="utf-8") as out_f:
+            writer = csv.DictWriter(out_f, fieldnames=output_fields)
+            writer.writeheader()
+
+            for i, row in enumerate(rows):
+                name = row.get(name_col, "").strip()
+                url = row.get(url_col, "").strip() if url_col in fieldnames else ""
+
+                if i in classified:
+                    row["Category"] = classified[i]["category"]
+                    row["Notes"] = classified[i]["notes"]
+                    print(f"Skipping {i+1}/{total}: {name} (already classified)")
+                else:
+                    print(f"Processing {i+1}/{total}: {name or '(unnamed)'}...")
+                    result = classify_company(client, name, url)
+                    row["Category"] = result.get("category", "Unknown")
+                    row["Notes"] = result.get("notes", "")
+                    time.sleep(0.5)
+
+                writer.writerow(row)
+                out_f.flush()
+
+        print(f"\nDone! Output written to: {output_path}")
+        return
+
+    # --resume: skip rows already written to output
     already_done = 0
     if resume and output_path.exists():
         with open(output_path, newline="", encoding="utf-8") as f:
             already_done = sum(1 for _ in csv.DictReader(f))
         print(f"Resuming from row {already_done + 1} ({already_done} already done)")
 
-    total = len(rows)
-    output_fields = list(fieldnames) + ["Category", "Notes"]
-
-    # Open in append mode if resuming, write mode otherwise
     file_mode = "a" if resume and already_done > 0 else "w"
     with open(output_path, file_mode, newline="", encoding="utf-8") as out_f:
         writer = csv.DictWriter(out_f, fieldnames=output_fields)
@@ -196,8 +235,9 @@ def main():
     parser.add_argument("--name", default="name", help="Column containing company names (default: 'name')")
     parser.add_argument("--url", default="website", help="Column containing website URLs (default: 'website')")
     parser.add_argument("--resume", action="store_true", help="Skip rows already in the output file")
+    parser.add_argument("--redo-errors", action="store_true", help="Re-process rows that failed with API errors")
     args = parser.parse_args()
-    process_csv(args.input, args.name, args.url, args.resume)
+    process_csv(args.input, args.name, args.url, args.resume, args.redo_errors)
 
 
 if __name__ == "__main__":
